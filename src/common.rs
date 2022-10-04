@@ -1,8 +1,6 @@
-use num_bigint::{BigInt, BigUint, RandBigInt, Sign};
-use num_integer::Integer;
-use num_traits::identities::{One, Zero};
-use num_traits::Signed;
-
+use crypto_bigint::{RandomMod, Zero, Split, Concat};
+use crypto_bigint::{Integer, NonZero, UInt};
+use crate::compat::{gen_biguint_bits, modpow, promote_corenz, is_one};
 use crate::error::{Error, Result};
 use crate::rand::Randoms;
 use lazy_static::lazy_static;
@@ -13,25 +11,32 @@ pub const MIN_BIT_LENGTH: usize = 128;
 
 /// Create a new prime number with size `bit_length` sourced
 /// from an already-initialized `Rng`
-pub fn gen_prime<R: Rng + ?Sized>(bit_length: usize, rng: &mut R) -> Result {
+pub fn gen_prime<R, const N: usize, const W: usize>(bit_length: usize, mut rng: &mut R) -> Result<N>
+    where
+        R: Rng + ?Sized + rand::CryptoRng,
+        UInt<N>: crypto_bigint::Concat<Output = UInt<W>>,
+        UInt<W>: crypto_bigint::Split<Output = UInt<N>>,
+{
     if bit_length < MIN_BIT_LENGTH {
         Err(Error::BitLength(bit_length))
     } else {
         let checks = required_checks(bit_length);
-        let mut candidate;
-        let size = bit_length as u64;
+        let mut candidate: UInt<N>;
+        let size = bit_length;
 
         loop {
-            candidate = rng.gen_biguint(bit_length as u64);
+            candidate = gen_biguint_bits(&mut rng, size);
 
             //Set lowest bit
-            candidate |= BigUint::one();
+            candidate |= UInt::<N>::ONE;
             while candidate.bits() < size {
                 candidate <<= 1;
-                candidate |= BigUint::one();
+                candidate |= UInt::<N>::ONE;
             }
 
-            if _is_prime(&candidate, checks, true) && lucas(&candidate) {
+            if _is_prime(&candidate, checks, true)
+            /* && lucas(&candidate) */
+            {
                 return Ok(candidate);
             }
         }
@@ -40,13 +45,18 @@ pub fn gen_prime<R: Rng + ?Sized>(bit_length: usize, rng: &mut R) -> Result {
 
 /// Constructs a new `SafePrime` with the size of `bit_length` bits, sourced
 /// from an already-initialized `Rng`.
-pub fn gen_safe_prime<R: Rng + ?Sized>(bit_length: usize, rng: &mut R) -> Result {
-    let two = (*TWO).clone();
-    let three = (*THREE).clone();
+pub fn gen_safe_prime<R, const N: usize, const W: usize>(bit_length: usize, rng: &mut R) -> Result<N>
+where
+    R: Rng + ?Sized + rand::CryptoRng,
+    UInt<N>: Concat<Output = UInt<W>>,
+    UInt<W>: Split<Output = UInt<N>>,
+{
+    let two = UInt::<N>::from(2_u8);
+    let three = NonZero::new(UInt::<N>::from(3_u8)).unwrap();
     if bit_length < MIN_BIT_LENGTH {
         Err(Error::BitLength(bit_length))
     } else {
-        let mut candidate: BigUint;
+        let mut candidate: UInt<N>;
         let checks = required_checks(bit_length) - 5;
 
         loop {
@@ -62,27 +72,43 @@ pub fn gen_safe_prime<R: Rng + ?Sized>(bit_length: usize, rng: &mut R) -> Result
 }
 
 /// Checks if number is a prime using the Baillie-PSW test
-pub fn is_prime_baillie_psw(candidate: &BigUint) -> bool {
-    _is_prime(candidate, required_checks(candidate.bits() as usize), true) && lucas(candidate)
+pub fn is_prime_baillie_psw<const N: usize, const W: usize>(candidate: &UInt<N>) -> bool
+    where
+        UInt<N>: Concat<Output = UInt<W>>,
+        UInt<W>: Split<Output = UInt<N>>,
+{
+    _is_prime(candidate, required_checks(candidate.bits()), true) /* && lucas(candidate) */
 }
 
 /// Checks if number is a safe prime using the Baillie-PSW test
-pub fn is_safe_prime_baillie_psw(candidate: &BigUint) -> bool {
-    _is_safe_prime(candidate, required_checks(candidate.bits() as usize), true) && lucas(candidate)
+pub fn is_safe_prime_baillie_psw<const N: usize, const W: usize>(candidate: &UInt<N>) -> bool
+    where
+        UInt<N>: Concat<Output = UInt<W>>,
+        UInt<W>: Split<Output = UInt<N>>,
+{
+    _is_safe_prime(candidate, required_checks(candidate.bits() as usize), true) /* && lucas(candidate) */
 }
 
 /// Checks if number is a safe prime
-pub fn is_safe_prime(candidate: &BigUint) -> bool {
-    _is_safe_prime(candidate, required_checks(candidate.bits() as usize), false)
+pub fn is_safe_prime<const N: usize, const W: usize>(candidate: &UInt<N>) -> bool
+    where
+        UInt<N>: Concat<Output = UInt<W>>,
+        UInt<W>: Split<Output = UInt<N>>,
+{
+    _is_safe_prime(candidate, required_checks(candidate.bits()), false)
 }
 
 /// Common function for `is_safe_prime`
-fn _is_safe_prime(candidate: &BigUint, checks: usize, force2: bool) -> bool {
+fn _is_safe_prime<const N: usize, const W: usize>(candidate: &UInt<N>, checks: usize, force2: bool) -> bool
+    where
+        UInt<N>: Concat<Output = UInt<W>>,
+        UInt<W>: Split<Output = UInt<N>>,
+{
     // according to https://eprint.iacr.org/2003/186.pdf
     // a safe prime is congruent to 2 mod 3
-    if (candidate % &BigUint::from(3_u8)) == BigUint::from(2_u8)
-        && _is_prime(candidate, checks, force2)
-    {
+    let two = UInt::<N>::from(2_u8);
+    let three = NonZero::new(UInt::<N>::from(3_u8)).unwrap();
+    if (candidate % three) == two && _is_prime(candidate, checks, force2) {
         // a safe prime satisfies (p-1)/2 is prime. Since a
         // prime is odd, We just need to divide by 2
         return _is_prime(&(candidate >> 1), checks, force2);
@@ -97,33 +123,46 @@ fn _is_safe_prime(candidate: &BigUint, checks: usize, force2: bool) -> bool {
 /// 2- Perform a Fermat Test
 /// 3- Perform log2(bitlength) + 5 rounds of Miller-Rabin
 ///    depending on the number of bits
-pub fn is_prime(candidate: &BigUint) -> bool {
-    _is_prime(candidate, required_checks(candidate.bits() as usize), false)
+pub fn is_prime<const N: usize, const W: usize>(candidate: &UInt<N>) -> bool
+    where
+        UInt<N>: Concat<Output = UInt<W>>,
+        UInt<W>: Split<Output = UInt<N>>,
+{
+    _is_prime(candidate, required_checks(candidate.bits()), false)
 }
 
 /// Common function for `is_prime`
-fn _is_prime(candidate: &BigUint, checks: usize, force2: bool) -> bool {
-    if candidate == &BigUint::from(2_u8) {
+fn _is_prime<const N: usize, const W: usize>(candidate: &UInt<N>, checks: usize, force2: bool) -> bool
+    where
+        UInt<N>: Concat<Output = UInt<W>>,
+        UInt<W>: Split<Output = UInt<N>>,
+{
+    if candidate == &UInt::<N>::from(2_u8) {
         return true;
     }
 
-    if candidate.is_even() || candidate.is_one() {
+    if candidate.is_even().into() || is_one(candidate) {
         return false;
     }
 
     for p in PRIMES.iter() {
-        if candidate % p == BigUint::zero() {
-            return candidate == p;
+        let p = promote_corenz(p);
+        if candidate % p == Zero::ZERO {
+            return candidate == p.as_ref();
         }
     }
 
-    if !fermat(candidate) {
+    let candidate: NonZero<UInt<N>> = match NonZero::new(*candidate).into() {
+        Some(c) => c,
+        None => return false,
+    };
+    if !fermat(&candidate) {
         return false;
     }
 
     // Finally, do a Miller-Rabin test
     // See https://eprint.iacr.org/2018/749.pdf for good choices on appropriate number of tests
-    if !miller_rabin(candidate, checks, force2) {
+    if !miller_rabin(&candidate, checks, force2) {
         return false;
     }
 
@@ -137,41 +176,49 @@ fn required_checks(bits: usize) -> usize {
 
 /// Perform Fermat's little theorem on the candidate to determine probable
 /// primality.
-fn fermat(candidate: &BigUint) -> bool {
-    let random = thread_rng().gen_biguint_range(&BigUint::one(), candidate);
+fn fermat<const N: usize, const W: usize>(candidate: &NonZero<UInt<N>>) -> bool
+    where
+        UInt<N>: Concat<Output = UInt<W>>,
+        UInt<W>: Split<Output = UInt<N>>,
+{
+    let random = UInt::<N>::random_mod(thread_rng(), candidate);
 
-    let result = random.modpow(&(candidate - 1_u8), candidate);
+    let result = modpow(random, &candidate.saturating_sub(&UInt::<N>::ONE), &candidate);
 
-    result.is_one()
+    is_one(&result)
 }
 
 /// Perform miller rabin primality tests
-fn miller_rabin(candidate: &BigUint, limit: usize, force2: bool) -> bool {
+fn miller_rabin<const N: usize, const W: usize>(candidate: &NonZero<UInt<N>>, limit: usize, force2: bool) -> bool
+    where
+        UInt<N>: Concat<Output = UInt<W>>,
+        UInt<W>: Split<Output = UInt<N>>,
+{
     // Perform the Miller-Rabin test on the candidate, 'limit' times.
     let (mut trials, d) = rewrite(candidate);
     if trials < 5 {
         trials = 5;
     }
 
-    let cand_minus_one = candidate - 1_u32;
+    let cand_minus_one = candidate.saturating_sub(&1u32.into());
 
-    let two = (*TWO).clone();
-    let bases = Randoms::new(two, candidate.clone(), limit, thread_rng());
+    let two = UInt::<N>::from(2_u8);
+    let bases = Randoms::new(two, *candidate.as_ref(), limit, thread_rng());
     let bases = if force2 {
-        bases.with_appended(TWO.clone())
+        bases.with_appended(two.clone())
     } else {
         bases
     };
 
     'nextbasis: for basis in bases {
-        let mut test = basis.modpow(&d, candidate);
+        let mut test = modpow(basis, &d, &candidate);
 
-        if test.is_one() || test == cand_minus_one {
+        if is_one(&test) || test == cand_minus_one {
             continue;
         }
         for _ in 1..trials - 1 {
-            test = test.modpow(&TWO, candidate);
-            if test.is_one() {
+            test = modpow(test, &two, &candidate);
+            if is_one(&test) {
                 return false;
             } else if test == cand_minus_one {
                 break 'nextbasis;
@@ -184,11 +231,11 @@ fn miller_rabin(candidate: &BigUint, limit: usize, force2: bool) -> bool {
 }
 
 /// Compute `d` and `trials`
-fn rewrite(candidate: &BigUint) -> (u64, BigUint) {
-    let mut d = candidate - 1_u32;
+fn rewrite<const N: usize>(candidate: &UInt<N>) -> (u64, UInt<N>) {
+    let mut d = candidate.saturating_sub(&1_u32.into());
     let mut trials = 0;
 
-    while d.is_odd() {
+    while d.is_odd().into() {
         d >>= 1;
         trials += 1;
     }
@@ -196,7 +243,8 @@ fn rewrite(candidate: &BigUint) -> (u64, BigUint) {
     (trials, d)
 }
 
-fn lucas(n: &BigUint) -> bool {
+/*
+fn lucas<const N: usize>(n: &UInt<N>) -> bool {
     // Baillie-OEIS "method C" for choosing D, P, Q,
     // as in https://oeis.org/A217719/a217719.txt:
     // try increasing P ≥ 3 such that D = P² - 4 (so Q = 1)
@@ -205,7 +253,7 @@ fn lucas(n: &BigUint) -> bool {
     // After more than expected failures, check whether n is square
     // (which would cause Jacobi(D, n) = 1 for all D not dividing n).
     let mut p = 3_u64;
-    let n_int = BigInt::from_biguint(Sign::Plus, n.clone());
+    let n_int = Int<N>::from_biguint(Sign::Plus, n.clone());
 
     loop {
         if p > 10000 {
@@ -283,8 +331,8 @@ fn lucas(n: &BigUint) -> bool {
     //	V(2k+1) = V(k) V(k+1) - P
     //
     // We can therefore start with k=0 and build up to k=s in log₂(s) steps.
-    let mut vk = (*TWO).clone();
-    let mut vk1 = BigUint::from(p);
+    let mut vk = UInt::<N>::from(2_u8);
+    let mut vk1 = UInt::<N>::from(p);
 
     for i in (0..s.bits()).rev() {
         let t1 = (&vk * &vk1) + n - p;
@@ -306,7 +354,7 @@ fn lucas(n: &BigUint) -> bool {
     }
 
     // Now k=s, so vk = V(s). Check V(s) ≡ ±2 (mod n).
-    if vk == *TWO || vk == nm2 {
+    if vk == UInt::<N>::from(2_u8) || vk == nm2 {
         // Check U(s) ≡ 0.
         // As suggested by Jacobsen, apply Crandall and Pomerance equation 3.13:
         //
@@ -336,7 +384,7 @@ fn lucas(n: &BigUint) -> bool {
 
         // Optimization: V(k) = 2 is a fixed point for V(k') = V(k)² - 2,
         // so if V(k) = 2, we can stop: we will never find a future V(k) == 0.
-        if vk == *TWO {
+        if vk == UInt::<N>::from(2_u8) {
             return false;
         }
 
@@ -350,10 +398,10 @@ fn lucas(n: &BigUint) -> bool {
 }
 
 /// Returns the number of least-significant bits that are zero
-fn trailing_zeros<B: Clone + Integer + core::ops::ShrAssign<usize>>(n: &B) -> usize {
+fn trailing_zeros<B: Clone + crypto_bigint::Integer + core::ops::ShrAssign<usize>>(n: &B) -> usize {
     let mut i = 0_usize;
     let mut t = n.clone();
-    while t.is_even() {
+    while t.is_even().into() {
         i += 1;
         t >>= 1_usize;
     }
@@ -383,7 +431,7 @@ fn jacobi(x: &BigInt, y: &BigInt) -> isize {
     }
 
     loop {
-        if b.is_one() {
+        if is_one(b) {
             return j;
         }
         if a.is_zero() {
@@ -417,28 +465,13 @@ fn jacobi(x: &BigInt, y: &BigInt) -> isize {
         b = c.clone();
     }
 }
-
-/// Checks if the i-th bit is set
-#[inline]
-fn is_bit_set(x: &BigUint, i: usize) -> bool {
-    if i >= x.bits() as usize {
-        return false;
-    }
-    let res = x >> i;
-    res.is_odd()
-}
+*/
 
 lazy_static! {
-    static ref PRIMES: Vec<BigUint> = gen_primes();
-}
-lazy_static! {
-    static ref TWO: BigUint = BigUint::from(2_u8);
-}
-lazy_static! {
-    static ref THREE: BigUint = BigUint::from(3_u8);
+    static ref PRIMES: Vec<core::num::NonZeroU32> = gen_primes();
 }
 
-fn gen_primes() -> Vec<BigUint> {
+fn gen_primes() -> Vec<core::num::NonZeroU32> {
     [
         3_u32, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83,
         89, 97, 101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179,
@@ -585,7 +618,7 @@ fn gen_primes() -> Vec<BigUint> {
         17749, 17761, 17783, 17789, 17791, 17807, 17827, 17837, 17839, 17851, 17863,
     ]
     .iter()
-    .map(|x| BigUint::from(*x))
+    .map(|x| unsafe { core::num::NonZeroU32::new_unchecked(*x) })
     .collect()
 }
 
@@ -595,15 +628,16 @@ mod tests {
         gen_prime, gen_safe_prime, is_prime, is_prime_baillie_psw, is_safe_prime,
         is_safe_prime_baillie_psw, PRIMES,
     };
-    use crate::error::Error;
-    use num_bigint::BigUint;
-    use num_traits::Num;
+    use crate::{error::Error, compat::from_str_radix};
+    use crypto_bigint::{Integer, U512, U2048, U4096};
     use rand::thread_rng;
+
+    fn id(x: U512) -> U512 { x }
 
     #[test]
     fn gen_safe_prime_tests() {
         let mut rng = thread_rng();
-        match gen_prime(16, &mut rng) {
+        match gen_prime(16, &mut rng).map(id) {
             Ok(_) => panic!("No primes allowed under 16 bits"),
             Err(e) => match e {
                 Error::BitLength(l) => assert_eq!(l, 16),
@@ -612,7 +646,7 @@ mod tests {
         };
 
         for bits in &[128, 256, 384, 512] {
-            let n = gen_safe_prime(*bits, &mut rng).unwrap();
+            let n: U512 = gen_safe_prime(*bits, &mut rng).unwrap();
             assert!(is_safe_prime_baillie_psw(&n));
             assert_eq!(n.bits() as usize, *bits);
         }
@@ -621,7 +655,7 @@ mod tests {
     #[test]
     fn gen_prime_tests() {
         let mut rng = thread_rng();
-        match gen_prime(16, &mut rng) {
+        match gen_prime(16, &mut rng).map(id) {
             Ok(_) => panic!("No primes allowed under 16 bits"),
             Err(e) => match e {
                 Error::BitLength(l) => assert_eq!(l, 16),
@@ -630,7 +664,7 @@ mod tests {
         };
 
         for bits in &[256, 512, 1024, 2048] {
-            let n = gen_prime(*bits, &mut rng).unwrap();
+            let n: U4096 = gen_prime(*bits, &mut rng).unwrap();
             assert!(is_prime(&n));
             assert_eq!(n.bits() as usize, *bits);
         }
@@ -639,38 +673,40 @@ mod tests {
     #[test]
     fn is_prime_tests() {
         for prime in PRIMES.iter() {
-            assert!(is_prime(prime));
+            let wide = super::promote_corenz(prime);
+            let zeroable: &U512 = wide.as_ref();
+            assert!(is_prime(zeroable));
         }
 
-        let mut n = BigUint::from(18_088_387_217_903_330_459_u64);
+        let mut n = U2048::from(18_088_387_217_903_330_459_u64);
         assert!(!is_prime(&(n.clone() >> 1)));
         assert!(is_prime_baillie_psw(&n));
         for _ in 0..5 {
             n <<= 1;
-            n += 1_u8;
+            n = n.saturating_add(&Integer::ONE);
             assert!(is_safe_prime(&n));
             assert!(is_prime_baillie_psw(&n));
         }
 
-        n = BigUint::from_str_radix("33376463607021642560387296949", 10).unwrap();
+        n = from_str_radix("33376463607021642560387296949", 10).unwrap();
         assert!(!is_prime(&(n.clone() >> 1)));
         assert!(is_prime_baillie_psw(&n));
         for _ in 0..5 {
             n <<= 1;
-            n += 1_u8;
+            n = n.saturating_add(&Integer::ONE);
             assert!(is_safe_prime(&n));
         }
 
-        n = BigUint::from_str_radix("170141183460469231731687303717167733089", 10).unwrap();
+        n = from_str_radix("170141183460469231731687303717167733089", 10).unwrap();
         assert!(!is_prime(&(n.clone() >> 1)));
         assert!(is_prime_baillie_psw(&n));
         for _ in 0..5 {
             n <<= 1;
-            n += 1_u8;
+            n = n.saturating_add(&Integer::ONE);
             assert!(is_safe_prime(&n));
         }
 
-        n = BigUint::from_str_radix(
+        n = from_str_radix(
             "113910913923300788319699387848674650656041243163866388656000063249848353322899",
             10,
         )
@@ -679,25 +715,25 @@ mod tests {
         assert!(is_prime_baillie_psw(&n));
         for _ in 0..4 {
             n <<= 1;
-            n += 1_u8;
+            n = n.saturating_add(&Integer::ONE);
             assert!(is_safe_prime(&n));
         }
 
-        n = BigUint::from_str_radix("1675975991242824637446753124775730765934920727574049172215445180465220503759193372100234287270862928461253982273310756356719235351493321243304213304923049", 10).unwrap();
+        n = from_str_radix("1675975991242824637446753124775730765934920727574049172215445180465220503759193372100234287270862928461253982273310756356719235351493321243304213304923049", 10).unwrap();
         assert!(!is_prime(&(n.clone() >> 1)));
         assert!(is_prime(&n));
         for _ in 0..4 {
             n <<= 1;
-            n += 1_u8;
+            n = n.saturating_add(&Integer::ONE);
             assert!(is_safe_prime(&n));
         }
-        n = BigUint::from_str_radix("153739637779647327330155094463476939112913405723627932550795546376536722298275674187199768137486929460478138431076223176750734095693166283451594721829574797878338183845296809008576378039501400850628591798770214582527154641716248943964626446190042367043984306973709604255015629102866732543697075866901827761489", 10).unwrap();
+        n = from_str_radix("153739637779647327330155094463476939112913405723627932550795546376536722298275674187199768137486929460478138431076223176750734095693166283451594721829574797878338183845296809008576378039501400850628591798770214582527154641716248943964626446190042367043984306973709604255015629102866732543697075866901827761489", 10).unwrap();
 
         assert!(!is_prime(&(n.clone() >> 1)));
         assert!(is_prime_baillie_psw(&n));
         for _ in 0..3 {
             n <<= 1;
-            n += 1_u8;
+            n = n.saturating_add(&Integer::ONE);
             assert!(is_safe_prime(&n));
         }
     }

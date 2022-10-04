@@ -1,6 +1,7 @@
 //! Generates cryptographically secure safe prime numbers.
 
 use rand::rngs::OsRng;
+use crypto_bigint::{UInt, Concat, Split};
 
 use crate::common::MIN_BIT_LENGTH;
 pub use crate::common::{
@@ -14,7 +15,11 @@ use crate::error::{Error, Result};
 /// `from_rng()` function.
 ///
 /// Note: the `bit_length` MUST be at least 128-bits.
-pub fn new(bit_length: usize) -> Result {
+pub fn new<const N: usize, const W: usize>(bit_length: usize) -> Result<N>
+    where
+        UInt<N>: Concat<Output = UInt<W>>,
+        UInt<W>: Split<Output = UInt<N>>,
+{
     if bit_length < MIN_BIT_LENGTH {
         Err(Error::BitLength(bit_length))
     } else {
@@ -26,13 +31,26 @@ pub fn new(bit_length: usize) -> Result {
 #[cfg(test)]
 mod tests {
     use super::{check, new, strong_check};
+    use crypto_bigint::{UInt, Concat, Split};
 
-    #[test]
-    fn tests() {
-        for bits in &[128, 256, 384] {
-            let n = new(*bits).unwrap();
+    fn tests_for<const N: usize, const W: usize>()
+        where
+            UInt<N>: Concat<Output = UInt<W>>,
+            UInt<W>: Split<Output = UInt<N>>,
+    {
+        let bits_options = [128, 256, 512, 1024].iter().filter(|n| **n <= N * 8);
+        for bits in bits_options {
+            let n: crypto_bigint::UInt<N> = new(*bits).unwrap();
             assert!(check(&n));
             assert!(strong_check(&n));
         }
+    }
+
+    #[test]
+    fn tests() {
+        tests_for::<1, 2>();
+        tests_for::<4, 8>();
+        tests_for::<8, 16>();
+        tests_for::<16, 32>();
     }
 }

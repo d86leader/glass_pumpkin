@@ -1,3 +1,4 @@
+/*
 #![deny(
     warnings,
     missing_docs,
@@ -7,6 +8,7 @@
     trivial_casts,
     trivial_numeric_casts
 )]
+*/
 //! A crate for generating large prime numbers, suitable for cryptography.
 //!
 //! Primes are generated similarly to OpenSSL except it applies some recommendations
@@ -18,6 +20,7 @@
 //! 4. Runs Baillie-PSW test with `log2(bits) + 5` Miller-Rabin tests
 
 mod common;
+mod compat;
 pub mod error;
 pub mod prime;
 mod rand;

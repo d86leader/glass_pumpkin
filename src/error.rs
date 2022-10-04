@@ -6,7 +6,7 @@ use core2::error;
 use rand;
 
 /// Default result struct
-pub type Result = result::Result<num_bigint::BigUint, Error>;
+pub type Result<const N: usize> = result::Result<crypto_bigint::UInt<N>, Error>;
 
 /// Error struct
 #[derive(Debug)]
